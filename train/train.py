@@ -84,25 +84,37 @@ def collate_fn(batch, padding_value=PADDING_VALUE):
 
     return padded_tokens, y_labels
 
+def accuracy(out: torch.Tensor, target: torch.Tensor):
+    sig_out = torch.sigmoid(out)
+    N, C = sig_out.shape
+    sig_out[sig_out >= 0.5] = 1
+    sig_out[sig_out < 0.5] = 0
+    acc = (sig_out == target).sum() / (N * C) * 100
+    return acc
+
 def eval_step(device: torch.device,
         valid_loader: torch.utils.data.DataLoader,
         model: nn.Module,
         criterion: nn.CrossEntropyLoss,
         steps: int,
         writer: SummaryWriter):
-    if steps % 20 == 0:
+    if steps % 1 == 0:
         model.eval()     
         total_loss = 0.0
+        total_acc = 0.0
         for input, target in tqdm(valid_loader, leave=False):
             input = input.to(device)
             target = target.to(torch.int64)-1
-            target = F.one_hot(target, num_classes=4).long()
+            target = F.one_hot(target, num_classes=4).to(torch.float)
             target = target.to(device)
-            out = model(input)
+            out = model(input).squeeze()
             total_loss += criterion(out, target)
+            total_acc += accuracy(out, target)
 
         mean_loss = total_loss / len(valid_loader)
-        writer.add_scalar('valid/cross entropy', mean_loss, global_step=steps)
+        acc = total_acc / len(valid_loader)
+        writer.add_scalar('test/cross entropy', mean_loss, global_step=steps)
+        writer.add_scalar('test/accuracy', acc, global_step=steps)
 
 def train_step(device: torch.device,
         train_loader: torch.utils.data.DataLoader,
@@ -117,16 +129,16 @@ def train_step(device: torch.device,
     for input, target in tqdm(train_loader, leave=False):
         input = input.to(device)
         target = target.to(torch.int64)-1
-        target = F.one_hot(target, num_classes=4)
+        target = F.one_hot(target, num_classes=4).to(torch.float)
         target = target.to(device)
-        out = model(input)
+        out = model(input).squeeze()
 
         # calculate loss
         loss = criterion(out, target)
         
         # log
-        if steps % 10 == 0:
-            writer.add_scalar('train/loss', loss,
+        if steps % 100 == 0:
+            writer.add_scalar('train/cross entropy', loss,
                                 global_step=steps)
             writer.add_scalar('train/learning_rate',
                                 scheduler.get_last_lr()[0],
@@ -184,7 +196,7 @@ if __name__ == '__main__':
     val_sampler   = RandomSampler(val_dataset)
     test_sampler  = RandomSampler(test_dataset)
 
-    BATCH_SIZE = 100
+    BATCH_SIZE = 2048
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler, collate_fn=collate_fn)
     val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, sampler=val_sampler, collate_fn=collate_fn)
@@ -202,13 +214,13 @@ if __name__ == '__main__':
     criterion = nn.CrossEntropyLoss().to(device)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
-        step_size=100,
+        step_size=1e5,
         gamma=0.99)
     
     PATH = "./toxicity_classifier"
     writer = SummaryWriter(PATH)
 
-    num_epoch = 100
+    num_epoch = 20
     train_val(train_loader,
             test_loader,
             model,
@@ -218,5 +230,5 @@ if __name__ == '__main__':
             criterion,
             scheduler,
             num_epoch)
-            
+
     torch.save(model.state_dict(), PATH + F"/classifier{num_epoch}epoch.pth")
