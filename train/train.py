@@ -12,6 +12,7 @@ from torch.utils.data import RandomSampler
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.tensorboard import SummaryWriter
 from model.cnn_lstm import CNN_LSTM
+import torchmetrics
 
 PADDING_VALUE = 0
 UNK_VALUE     = 1
@@ -29,6 +30,7 @@ def generate_vocab_map(df, cutoff=2):
     wordCnt = dict()
 
     for word in df["tokenized"]:
+    # for word in df["disabled_omit"]:
         wordCount = Counter(word)
         for (id, cnt) in wordCount.items():
             if id in wordCnt:
@@ -59,6 +61,7 @@ class HeadlineDataset(Dataset):
         word_list = list()
 
         for i, word in enumerate(self.df.iloc[index].loc['tokenized']):
+        # for i, word in enumerate(self.df.iloc[index].loc['disabled_omit']):
             if i == self.max_length:
                 break
             if word not in self.vocab:
@@ -92,16 +95,46 @@ def accuracy(out: torch.Tensor, target: torch.Tensor):
     acc = (sig_out == target).sum() / (N * C) * 100
     return acc
 
+def precision(prec, out: torch.Tensor, target: torch.Tensor):
+    sig_out = torch.sigmoid(out)
+    N, C = sig_out.shape
+    sig_out[sig_out >= 0.5] = 1
+    sig_out[sig_out < 0.5] = 0
+    return prec(sig_out, target)
+
+
+def recall(rec, out: torch.Tensor, target: torch.Tensor):
+    sig_out = torch.sigmoid(out)
+    N, C = sig_out.shape
+    sig_out[sig_out >= 0.5] = 1
+    sig_out[sig_out < 0.5] = 0
+    return rec(sig_out, target)
+
+def f1_score(f1, out: torch.Tensor, target: torch.Tensor):
+    sig_out = torch.sigmoid(out)
+    N, C = sig_out.shape
+    sig_out[sig_out >= 0.5] = 1
+    sig_out[sig_out < 0.5] = 0
+    return f1(sig_out, target)
+
 def eval_step(device: torch.device,
         valid_loader: torch.utils.data.DataLoader,
         model: nn.Module,
         criterion: nn.CrossEntropyLoss,
         steps: int,
-        writer: SummaryWriter):
+        writer: SummaryWriter,
+        prec,
+        rec,
+        f1):
     if steps % 1 == 0:
         model.eval()     
         total_loss = 0.0
         total_acc = 0.0
+
+        total_prec = torch.tensor([0.0,0.0,0.0,0.0]).to(device)
+        total_recall = torch.tensor([0.0,0.0,0.0,0.0]).to(device)
+        total_f1 = torch.tensor([0.0,0.0,0.0,0.0]).to(device)
+
         for input, target in tqdm(valid_loader, leave=False):
             input = input.to(device)
             target = target.to(torch.int64)-1
@@ -110,11 +143,37 @@ def eval_step(device: torch.device,
             out = model(input).squeeze()
             total_loss += criterion(out, target)
             total_acc += accuracy(out, target)
+            # print("out shape: ", out.shape)
+            # print("target shape: ", target.shape)
+            total_prec += precision(prec, out, target)
+            total_recall += recall(rec, out, target)
+            total_f1 += f1_score(f1, out, target)
 
         mean_loss = total_loss / len(valid_loader)
         acc = total_acc / len(valid_loader)
+        mean_prec = total_prec / len(valid_loader)
+        mean_rec = total_recall / len(valid_loader)
+        mean_f1_score = total_f1 / len(valid_loader)
+
         writer.add_scalar('test/cross entropy', mean_loss, global_step=steps)
         writer.add_scalar('test/accuracy', acc, global_step=steps)
+
+        writer.add_scalar('test/precision_class0', mean_prec[0], global_step=steps)
+        writer.add_scalar('test/recall_class0', mean_rec[0], global_step=steps)
+        writer.add_scalar('test/f1_score_class0', mean_f1_score[0], global_step=steps)
+        
+        writer.add_scalar('test/precision_class1', mean_prec[1], global_step=steps)
+        writer.add_scalar('test/recall_class1', mean_rec[1], global_step=steps)
+        writer.add_scalar('test/f1_score_class1', mean_f1_score[1], global_step=steps)
+
+        writer.add_scalar('test/precision_class2', mean_prec[2], global_step=steps)
+        writer.add_scalar('test/recall_class2', mean_rec[2], global_step=steps)
+        writer.add_scalar('test/f1_score_class2', mean_f1_score[2], global_step=steps)        
+        
+        writer.add_scalar('test/precision_class3', mean_prec[3], global_step=steps)
+        writer.add_scalar('test/recall_class3', mean_rec[3], global_step=steps)
+        writer.add_scalar('test/f1_score_class3', mean_f1_score[3], global_step=steps)
+        
 
 def train_step(device: torch.device,
         train_loader: torch.utils.data.DataLoader,
@@ -160,7 +219,10 @@ def train_val(train_loader: torch.utils.data.DataLoader,
         optimizer: torch.optim.Optimizer,
         criterion: nn.CrossEntropyLoss,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
-        num_epoch: int):
+        num_epoch: int,
+        precision,
+        recall,
+        f1):
 
     steps: int = 0
     for epoch in tqdm(range(num_epoch)):
@@ -170,7 +232,10 @@ def train_val(train_loader: torch.utils.data.DataLoader,
                 model,
                 criterion,
                 steps,
-                writer) 
+                writer,
+                precision,
+                recall,
+                f1) 
         # training
         steps = train_step(device,
                         train_loader,
@@ -184,6 +249,10 @@ def train_val(train_loader: torch.utils.data.DataLoader,
 if __name__ == '__main__':
     torch.cuda.empty_cache()
     train = pd.read_pickle("../data/train.pkl")
+    # train1 = pd.read_pickle("../data/train_disability_omit1.pkl")
+    # train2 = pd.read_pickle("../data/train_disability_omit1.pkl")  
+    # train3 = pd.read_pickle("../data/train_disability_omit1.pkl")
+    # train = pd.concat([train1, train2, train3])
     df = train.sample(frac=1)
     train_df, val_df, test_df = split_train_val_test(df, props=[.8, .1, .1])
     train_vocab = generate_vocab_map(train_df)
@@ -198,9 +267,9 @@ if __name__ == '__main__':
 
     BATCH_SIZE = 2048
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler, collate_fn=collate_fn)
-    val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, sampler=val_sampler, collate_fn=collate_fn)
-    test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler, collate_fn=collate_fn, drop_last=True)
+    val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, sampler=val_sampler, collate_fn=collate_fn, drop_last=True)
+    test_loader  = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler, collate_fn=collate_fn, drop_last=True)
 
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     model = CNN_LSTM(voc_size = max(train_vocab.values())+1)
@@ -220,6 +289,10 @@ if __name__ == '__main__':
     PATH = "./toxicity_classifier"
     writer = SummaryWriter(PATH)
 
+    prec = torchmetrics.Precision(task='multiclass', average='none' , num_classes=4).to(device)
+    rec = torchmetrics.Recall(task='multiclass', average='none' , num_classes=4).to(device)
+    f1 = torchmetrics.F1Score(task='multiclass', average='none' , num_classes=4).to(device)
+
     num_epoch = 20
     train_val(train_loader,
             test_loader,
@@ -229,6 +302,10 @@ if __name__ == '__main__':
             optimizer,
             criterion,
             scheduler,
-            num_epoch)
+            num_epoch,
+            prec,
+            rec,
+            f1)
 
     torch.save(model.state_dict(), PATH + F"/classifier{num_epoch}epoch.pth")
+    # torch.save(model.state_dict(), PATH + F"/omit_classifier{num_epoch}epoch.pth")
